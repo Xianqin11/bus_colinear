@@ -5,6 +5,7 @@ import json
 import os
 import csv
 import io
+import re
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 
@@ -17,9 +18,8 @@ def get_custom_font():
     return font_manager.FontProperties(family='sans-serif')
 
 my_font = get_custom_font()
-CACHE_FILE = "bus_cache.json"
 
-# --- 2. 北京地铁全线数据库 (2026.03 版) ---
+# --- 2. 北京地铁全线数据库 (保持不变) ---
 SUBWAY_DB = {
     "1号线（八通线）": "福寿岭,苹果园,古城,八角游乐园,八宝山,玉泉路,五棵松,万寿路,公主坟,军事博物馆,木樨地,南礼士路,复兴门,西单,天安门西,天安门东,王府井,东单,建国门,永安里,国贸,大望路,四惠,四惠东,高碑店,传媒大学,双桥,管庄,八里桥,通州北苑,果园,九棵树,梨园,临河里,土桥,花庄,环球度假区",
     "2号线": "西直门,积水潭,鼓楼大街,安定门,雍和宫,东直门,东四十条,朝阳门,建国门,北京站,崇文门,前门,和平门,宣武门,长椿街,复兴门,阜成门,车公庄,西直门",
@@ -107,13 +107,13 @@ def draw_gantt(station_data, report):
     return fig
 
 # --- 4. Streamlit 界面主体 ---
-st.set_page_config(page_title="公交共线分析工具 V2.0", layout="wide")
-st.title("🚇 公交与轨道共线分析系统 V2.0")
+st.set_page_config(page_title="公交共线分析工具 V2.1", layout="wide")
+st.title("🚇 公交与轨道共线分析系统 V2.1")
 
 st.sidebar.header("🛠️ 调研模式选择")
 mode = st.sidebar.radio("选择分析对象：", ["既有全线分析", "既有区间", "规划线路(坐标)"], horizontal=True)
 
-# 处理不同模式的输入
+# 处理模式逻辑
 is_coord_mode = False
 if mode == "既有全线分析":
     selected_line = st.sidebar.selectbox("选择地铁线路", list(SUBWAY_DB.keys()))
@@ -121,7 +121,8 @@ if mode == "既有全线分析":
 elif mode == "既有区间":
     input_str = st.sidebar.text_area("输入站点名称(逗号分隔)", "马连洼, 上地软件园, 东北旺")
 else:
-    input_str = st.sidebar.text_area("输入经纬度序列(经度,纬度;...)", "116.27,40.03; 116.30,40.04")
+    st.sidebar.markdown("🔗 [高德坐标拾取工具](https://lbs.amap.com/tools/picker)")
+    input_str = st.sidebar.text_area("输入“名称 坐标”(例如：嘻嘻站 116.27,40.03; 分号分隔)", "点位A 116.27,40.03; 点位B 116.30,40.04")
     is_coord_mode = True
 
 api_key = st.sidebar.text_input("高德 API 密钥", type="password", value=st.secrets.get("AMAP_KEY", ""))
@@ -143,11 +144,15 @@ if st.sidebar.button("🚀 启动核心分析"):
         for i, item in enumerate(raw_items):
             status.text(f"正在分析第 {i+1}/{len(raw_items)} 个点位...")
             if is_coord_mode:
-                # 坐标模式：直接使用输入的坐标
-                loc = item
-                name = f"点位{i+1}\n({item})"
+                # 增强型坐标解析：支持 "站名 坐标" 或 "坐标"
+                match = re.search(r"(\d+\.\d+,\d+\.\d+)", item)
+                if match:
+                    loc = match.group(1)
+                    name_part = item.replace(loc, "").strip()
+                    name = f"{name_part}\n({loc})" if name_part else f"点位{i+1}\n({loc})"
+                else:
+                    loc, name = None, f"格式错误:{item}"
             else:
-                # 站名模式：调用高德 API 转坐标
                 name = item
                 url = f"https://restapi.amap.com/v3/place/text?key={api_key}&keywords={name}地铁站&city=北京&types=150500&output=json"
                 try:
@@ -157,7 +162,7 @@ if st.sidebar.button("🚀 启动核心分析"):
             
             buses = fetch_bus_lines(api_key, loc) if loc else []
             station_data.append({"id": i, "name": name, "bus_list": buses})
-            time.sleep(0.5) # 防止请求过快
+            time.sleep(0.3)
             prog.progress((i+1)/len(raw_items))
 
         status.success("分析完成！")
@@ -165,12 +170,31 @@ if st.sidebar.button("🚀 启动核心分析"):
         fig = draw_gantt(station_data, report)
         if fig:
             st.pyplot(fig)
-            # 下载数据
             output = io.StringIO(); writer = csv.writer(output)
             writer.writerow(["起始站", "终点站", "站数", "公交线路"])
             for sid, recs in report.items():
                 for l, s, e, b in recs:
                     writer.writerow([station_data[s]['name'].split('\n')[0], station_data[e]['name'].split('\n')[0], l, b])
             st.download_button("📥 导出分析明细 (CSV)", output.getvalue().encode('utf_8_sig'), "report.csv", "text/csv")
-        else:
-            st.info("未发现符合条件的共线线路。")
+
+# --- 5. 网页使用说明书 (左下方) ---
+st.sidebar.markdown("---")
+with st.sidebar.expander("📖 网页使用说明书"):
+    st.markdown("""
+    **1. 既有全线分析**
+    - 直接从下拉菜单选择北京既有地铁线路。
+    - 系统自动加载该线路2026年最新站点序列。
+
+    **2. 既有区间**
+    - 手动输入站点名称，用**逗号**隔开。
+    - 适用于跨线或特定路段调研。
+
+    **3. 规划线路(坐标)**
+    - 点击上方链接进入高德拾取器。
+    - 格式：`站名 经度,纬度;`。
+    - 示例：`嘻嘻站 116.27,40.03; 哈哈站 116.30,40.04`。
+    - 必须用**分号**分隔不同点位。
+
+    **4. 结果导出**
+    - 运行结束后可下载CSV表格进行二次计算。
+    """)
